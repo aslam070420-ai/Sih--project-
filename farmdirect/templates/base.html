@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b4f2c">
+  <meta name="color-scheme" content="light">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/farmdirect-icon.svg') }}">
+  <title>{% block title %}FarmDirect{% endblock %} — Farm to Consumer Marketplace</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/farmdirect-icon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap-icons.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/cinematic.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/peak_v9.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/peak_v11.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/peak_v12.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/peak_v14.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/final.css') }}">
+  <script>window.SCRIPT_ROOT = "{{ request.script_root }}";</script>
+</head>
+<body class="fd-shell fd-route-{{ request.endpoint|replace('.', '-') if request.endpoint else 'page' }}">
+<div id="fd-final-loader" class="fd-final-loader" aria-hidden="true"></div>
+<div id="fd-final-network-bar" class="fd-final-network-bar" role="status"><i class="bi bi-wifi-off"></i><span>You are offline — FarmDirect is using local data and verified mandi cache.</span></div>
+
+<nav class="navbar navbar-expand-lg fd-navbar sticky-top">
+  <div class="container">
+    <a class="navbar-brand" href="{{ url_for('views.landing') }}">
+      <span class="fd-final-brand-orb"><img src="{{ url_for('static', filename='icons/farmdirect-icon.svg') }}" alt=""></span>FarmDirect
+    </a>
+    <button class="navbar-toggler border-0" type="button" data-bs-toggle="collapse" data-bs-target="#fdnav">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="fdnav">
+      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('views.marketplace') }}"><i class="bi bi-shop me-1"></i>Marketplace</a></li>
+        <li class="nav-item"><a class="nav-link fd-live-market-nav" href="{{ url_for('views.market_intelligence') }}"><span class="fd-live-market-dot"></span><i class="bi bi-graph-up-arrow me-1"></i>Live Mandi</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('views.ivr_simulator') }}"><i class="bi bi-telephone me-1"></i>IVR Voice</a></li>
+        {% if request.endpoint == 'views.landing' %}
+        <li class="nav-item fd-nav-language-item">
+          <button class="nav-link fd-nav-language-btn" type="button" data-fd-language-open aria-haspopup="dialog" aria-controls="fd-language-menu">
+            <span class="fd-nav-language-icon"><i class="bi bi-translate"></i></span>
+            <span class="fd-nav-language-copy"><span class="fd-nav-language-kicker">Language</span><strong data-fd-current-language>English</strong></span>
+            <span class="fd-nav-language-pulse" aria-hidden="true"></span>
+            <i class="bi bi-chevron-down fd-nav-language-chevron" aria-hidden="true"></i>
+          </button>
+        </li>
+        {% endif %}
+        {% if g.role in ('farmer','fpo') %}
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.farmer_dashboard') }}"><i class="bi bi-speedometer2 me-1"></i>Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.farmer_orders') }}"><i class="bi bi-bag-check me-1"></i>Orders</a></li>
+        {% elif g.role == 'consumer' %}
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.consumer_dashboard') }}"><i class="bi bi-speedometer2 me-1"></i>Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.my_orders') }}"><i class="bi bi-bag-check me-1"></i>My Orders</a></li>
+        {% elif g.role == 'buyer' %}
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.buyer_dashboard') }}"><i class="bi bi-speedometer2 me-1"></i>Bulk Dashboard</a></li>
+        {% elif g.role == 'admin' %}
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.admin_dashboard') }}"><i class="bi bi-speedometer2 me-1"></i>Admin</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.ivr_admin') }}"><i class="bi bi-telephone-inbound me-1"></i>IVR Calls</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('views.logistics_dashboard') }}"><i class="bi bi-truck me-1"></i>Logistics</a></li>
+        {% endif %}
+      </ul>
+      <div class="fd-final-nav-status"><span id="fd-final-system-pill" class="fd-final-system-pill"><i class="bi bi-arrow-repeat"></i><span>Market status</span></span></div>
+      <ul class="navbar-nav ms-auto align-items-lg-center">
+        {% if g.user %}
+          {% if g.role == 'consumer' %}
+          <li class="nav-item me-lg-2">
+            <a class="btn btn-fd-outline position-relative" href="{{ url_for('views.cart') }}">
+              <i class="bi bi-cart3"></i> Cart
+              <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger fd-cart-count" style="display:{% if cart_count %}inline-flex{% else %}none{% endif %}">{{ cart_count or 0 }}</span>
+            </a>
+          </li>
+          {% endif %}
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle d-flex align-items-center gap-2" href="#" data-bs-toggle="dropdown">
+              <span class="fd-avatar">{{ g.user['name'][:1] }}</span>
+              <span class="d-lg-inline d-none">{{ g.user['name'].split(' ')[0] }}</span>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+              <li><span class="dropdown-item-text tiny-note">{{ g.user['email'] }} · {{ g.role|title }}</span></li>
+              <li><hr class="dropdown-divider"></li>
+              {% if g.role in ('farmer','fpo') %}
+                <li><a class="dropdown-item" href="{{ url_for('views.farmer_earnings') }}"><i class="bi bi-cash-coin me-2"></i>Earnings</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('views.forecast_page') }}"><i class="bi bi-graph-up-arrow me-2"></i>AI Forecast</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('views.price_page') }}"><i class="bi bi-tags me-2"></i>AI Price Guide</a></li>
+              {% elif g.role == 'admin' %}
+                <li><a class="dropdown-item" href="{{ url_for('views.logistics_dashboard') }}"><i class="bi bi-truck me-2"></i>Logistics</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('views.route_optimizer_page') }}"><i class="bi bi-signpost-2 me-2"></i>Route Optimizer</a></li>
+              {% elif g.role == 'consumer' %}
+                <li><a class="dropdown-item" href="{{ url_for('views.my_orders') }}"><i class="bi bi-bag me-2"></i>My Orders</a></li>
+              {% elif g.role == 'buyer' %}
+                <li><a class="dropdown-item" href="{{ url_for('views.buyer_dashboard') }}"><i class="bi bi-boxes me-2"></i>Bulk Dashboard</a></li>
+              {% endif %}
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item text-danger" href="{{ url_for('auth.logout') }}"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
+            </ul>
+          </li>
+        {% else %}
+          <li class="nav-item me-lg-2"><a class="btn btn-fd-outline" href="{{ url_for('auth.login') }}"><i class="bi bi-box-arrow-in-right me-1"></i>Login</a></li>
+          <li class="nav-item"><a class="btn btn-fd" href="{{ url_for('auth.register') }}">Join Free</a></li>
+        {% endif %}
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<main>
+  <div class="container mt-3">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+        <div class="alert alert-{{ 'danger' if category == 'danger' else category }} alert-dismissible fade show" role="alert">
+          {{ message }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+  </div>
+  {% block content %}{% endblock %}
+</main>
+
+<nav class="fd-final-mobile-nav" aria-label="Mobile quick navigation">
+  <a href="{{ url_for('views.landing') }}"><span class="fd-final-mobile-icon"><i class="bi bi-house"></i></span><span>Home</span></a>
+  <a href="{{ url_for('views.marketplace') }}"><span class="fd-final-mobile-icon"><i class="bi bi-shop"></i></span><span>Market</span></a>
+  <a href="{{ url_for('views.market_intelligence') }}"><span class="fd-final-mobile-icon"><i class="bi bi-graph-up-arrow"></i></span><span>Mandi</span></a>
+  <a href="{{ url_for('views.ivr_simulator') }}"><span class="fd-final-mobile-icon"><i class="bi bi-telephone"></i></span><span>IVR</span></a>
+  {% if g.role in ('farmer','fpo') %}<a href="{{ url_for('views.farmer_dashboard') }}"><span class="fd-final-mobile-icon"><i class="bi bi-speedometer2"></i></span><span>Account</span></a>
+  {% elif g.role == 'consumer' %}<a href="{{ url_for('views.consumer_dashboard') }}"><span class="fd-final-mobile-icon"><i class="bi bi-speedometer2"></i></span><span>Account</span></a>
+  {% elif g.role == 'buyer' %}<a href="{{ url_for('views.buyer_dashboard') }}"><span class="fd-final-mobile-icon"><i class="bi bi-speedometer2"></i></span><span>Account</span></a>
+  {% elif g.role == 'admin' %}<a href="{{ url_for('views.admin_dashboard') }}"><span class="fd-final-mobile-icon"><i class="bi bi-speedometer2"></i></span><span>Account</span></a>
+  {% else %}<a href="{{ url_for('auth.login') }}"><span class="fd-final-mobile-icon"><i class="bi bi-person"></i></span><span>Login</span></a>{% endif %}
+</nav>
+
+<button id="fd-final-top" class="fd-final-top" type="button" aria-label="Back to top"><i class="bi bi-arrow-up"></i></button>
+<div id="fd-final-install" class="fd-final-install" role="dialog" aria-label="Install FarmDirect">
+  <img src="{{ url_for('static', filename='icons/farmdirect-icon.svg') }}" alt="" width="44" height="44">
+  <div class="fd-final-install-copy"><b>Install FarmDirect</b><small>Add the SIH demo to your phone home screen for an app-like experience.</small></div>
+  <button id="fd-final-install-btn" class="btn btn-fd" type="button">Install</button>
+  <button id="fd-final-install-close" class="fd-final-install-close" type="button" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+</div>
+
+<footer class="fd-footer mt-auto">
+  <div class="container">
+    <div class="row g-4">
+      <div class="col-md-5">
+        <h5 class="text-white">🌱 FarmDirect</h5>
+        <p class="small mb-0" style="color:#9fc7ab">From Farm to Consumer — Better Prices for Everyone.<br>
+        A SIH prototype connecting farmers &amp; FPOs directly with consumers and bulk buyers,
+        with AI demand forecasting, fair price guidance and smart logistics.</p>
+      </div>
+      <div class="col-6 col-md-3">
+        <h6 class="text-white small text-uppercase">Explore</h6>
+        <ul class="list-unstyled small">
+          <li><a href="{{ url_for('views.marketplace') }}">Marketplace</a></li>
+          <li><a href="{{ url_for('auth.register') }}">Become a Seller</a></li>
+          <li><a href="{{ url_for('auth.register') }}">Bulk Buying</a></li>
+        </ul>
+      </div>
+      <div class="col-6 col-md-4">
+        <h6 class="text-white small text-uppercase">Prototype Info</h6>
+        <ul class="list-unstyled small">
+          <li>Offline-first demo · SQLite + Flask</li>
+          <li>AI: scikit-learn · pandas · NumPy</li>
+          <li>Demo data is simulated for demonstration</li>
+        </ul>
+      </div>
+    </div>
+    <hr style="border-color:#2a4a35">
+    <p class="small mb-0" style="color:#6f8f7c">© 2026 FarmDirect — Smart India Hackathon prototype. Built with Flask, Bootstrap &amp; Chart.js.</p>
+  </div>
+</footer>
+
+<script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/cinematic.js') }}"></script>
+<script src="{{ url_for('static', filename='js/site_motion.js') }}"></script>
+<script src="{{ url_for('static', filename='js/peak_v9.js') }}"></script>
+<script src="{{ url_for('static', filename='js/peak_v11.js') }}"></script>
+<script src="{{ url_for('static', filename='js/final.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

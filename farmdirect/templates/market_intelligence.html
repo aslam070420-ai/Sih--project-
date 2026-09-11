@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Live Mandi Intelligence{% endblock %}
+{% block content %}
+<section class="fd-market-intel-stage py-4 py-lg-5">
+  <div class="fd-market-intel-orb fd-market-intel-orb-a" aria-hidden="true"></div>
+  <div class="fd-market-intel-orb fd-market-intel-orb-b" aria-hidden="true"></div>
+  <div class="container position-relative">
+    <div class="fd-market-intel-hero mb-4">
+      <div class="fd-market-intel-copy">
+        <span class="fd-market-eyebrow"><span class="fd-live-market-dot"></span> Government market intelligence</span>
+        <h1>Official Indian Mandi Prices.<br><span>Synced into FarmDirect AI.</span></h1>
+        <p>FarmDirect automatically tries multiple government market sources — e-NAM first, AGMARKNET 2.0 second, Tamil Nadu AgriMarket third, then optional data.gov.in — converts price units to ₹/kg, stores every verified observation offline, and feeds the freshest trusted result into the AI fair-price engine.</p>
+      </div>
+      <div class="fd-market-intel-source">
+        <span class="fd-source-seal"><i class="bi bi-shield-check"></i></span>
+        <div><b>Multi-Source Government Sync</b><small>e-NAM → AGMARKNET 2.0 → TN AgriMarket → cache</small></div>
+        <span class="fd-source-state is-live">AUTO · {{ market_status.auto_sync_interval_min }} MIN</span>
+      </div>
+    </div>
+
+    <div class="fd-provider-grid mb-4" aria-label="Market data provider health">
+      {% for provider in market_status.providers %}
+      <div class="fd-card fd-provider-card p-3" data-provider="{{ provider.provider }}">
+        <div class="fd-provider-head">
+          <span class="fd-provider-icon">{% if provider.provider == 'enam' %}<i class="bi bi-broadcast-pin"></i>{% elif provider.provider == 'agmarknet2' %}<i class="bi bi-bank"></i>{% elif provider.provider == 'tn-agrimarket' %}<i class="bi bi-geo-alt"></i>{% else %}<i class="bi bi-cloud-arrow-down"></i>{% endif %}</span>
+          <span class="fd-provider-state fd-provider-state-{{ provider.status|replace(' ','-') }}">{{ provider.status|replace('-', ' ')|upper }}</span>
+        </div>
+        <b>{{ provider.label }}</b>
+        <small>{% if provider.last_success_at %}Last success {{ provider.last_success_at }}{% elif provider.message %}{{ provider.message }}{% else %}Waiting for first automatic probe{% endif %}</small>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="fd-card fd-market-intel-controls p-3 p-lg-4 mb-4">
+      <form method="get" class="row g-3 align-items-end">
+        <div class="col-lg-5">
+          <label class="form-label tiny-note fw-bold">CROP / COMMODITY</label>
+          <select class="form-select" name="crop">
+            {% for c in crops %}<option value="{{ c }}" {% if c == crop %}selected{% endif %}>{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-lg-4">
+          <label class="form-label tiny-note fw-bold">STATE (OPTIONAL)</label>
+          <select class="form-select" name="state">
+            <option value="">Latest available across India</option>
+            {% for s in states %}<option value="{{ s }}" {% if s == state %}selected{% endif %}>{{ s }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-lg-3 d-grid"><button class="btn btn-fd" type="submit"><i class="bi bi-search"></i> View Market</button></div>
+      </form>
+      <form method="post" class="mt-3 fd-market-sync-form">
+        <input type="hidden" name="crop" value="{{ crop }}">
+        <input type="hidden" name="state" value="{{ state or '' }}">
+        <button class="btn btn-fd-outline" type="submit"><i class="bi bi-arrow-repeat"></i> Sync official data now</button>
+        <span class="fd-meta">{% if market_status.last_success_at %}Last successful sync {{ market_status.last_success_at }}{% else %}No official sync completed yet{% endif %}</span>
+      </form>
+    </div>
+
+    <div class="row g-3 g-xl-4 mb-4">
+      <div class="col-xl-4">
+        <div class="fd-card fd-market-price-visual p-4 h-100">
+          <div class="fd-market-crop-logo">{{ crop_mark(crop, 'hero') }}</div>
+          <div class="fd-market-price-title"><span>{{ crop }}</span><small>{{ state or 'India-wide latest cache' }}</small></div>
+          {% if reference %}
+          <div class="fd-market-modal-price">₹{{ '%g'|format(reference.modal) }}<span>/kg</span></div>
+          <div class="fd-market-source-badge fd-market-source-{{ reference.status }}"><span class="fd-live-market-dot"></span>{{ 'OFFICIAL DAILY MANDI' if reference.status == 'official' else 'CACHED OFFICIAL MANDI' }}</div>
+          <div class="fd-market-range"><div><span>Minimum</span><b>₹{{ '%g'|format(reference.low) }}</b></div><div><span>Maximum</span><b>₹{{ '%g'|format(reference.high) }}</b></div></div>
+          <div class="fd-market-meta-stack">
+            <span><i class="bi bi-calendar3"></i>{{ reference.arrival_date }}</span>
+            <span><i class="bi bi-geo-alt"></i>{{ reference.market or 'Multiple mandis' }}{% if reference.state %}, {{ reference.state }}{% endif %}</span>
+            <span><i class="bi bi-database-check"></i>{{ reference.observations }} observations</span>
+            <span><i class="bi bi-shield-check"></i>{{ reference.provider }}</span>
+          </div>
+          {% else %}
+          <div class="fd-market-empty-price"><i class="bi bi-cloud-slash"></i><b>No official record cached for {{ crop }} yet.</b><span>Use “Sync official data now”. FarmDirect will automatically try every enabled provider in order; no API key is required for the keyless primary fallbacks.</span></div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="col-xl-8">
+        <div class="fd-card fd-market-chart-card p-3 p-lg-4 h-100">
+          <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3"><div><span class="fd-market-eyebrow">PRICE TREND</span><h5 class="fw-bold mb-0">Official modal mandi price history</h5></div><span class="fd-meta">₹ / kg</span></div>
+          {% if series %}<div class="fd-market-chart-wrap"><canvas id="mandiTrendChart" aria-label="Mandi price trend"></canvas></div>{% else %}<div class="fd-market-no-chart"><i class="bi bi-graph-up"></i><span>Trend appears after multiple official daily observations are cached.</span></div>{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 g-xl-4 mb-4">
+      <div class="col-md-4"><div class="fd-card fd-market-ai-card p-3 h-100"><span class="fd-market-ai-icon"><i class="bi bi-stars"></i></span><span class="fd-meta">FarmDirect AI fair price</span><strong>₹{{ '%g'|format(rec.suggested_price) }}/kg</strong><small>Uses demand, supply, grade, logistics and {{ 'official mandi input' if rec.official_market else 'historical fallback' }}.</small></div></div>
+      <div class="col-md-4"><div class="fd-card fd-market-ai-card p-3 h-100"><span class="fd-market-ai-icon"><i class="bi bi-shop"></i></span><span class="fd-meta">Traditional retail reference</span><strong>₹{{ '%g'|format(rec.traditional_retail) }}/kg</strong><small>Comparison model based on the current mandi base and traditional markup.</small></div></div>
+      <div class="col-md-4"><div class="fd-card fd-market-ai-card p-3 h-100"><span class="fd-market-ai-icon"><i class="bi bi-lightning-charge"></i></span><span class="fd-meta">Data mode</span><strong>{{ 'OFFICIAL' if rec.official_market else 'ESTIMATE' }}</strong><small>{{ rec.market_source|replace('-', ' ')|title }} · never presented as live when unavailable.</small></div></div>
+    </div>
+
+    <div class="fd-card fd-market-table-card p-3 p-lg-4 mb-4">
+      <div class="d-flex align-items-center justify-content-between gap-3 flex-wrap mb-3"><div><span class="fd-market-eyebrow">MANDI OBSERVATIONS</span><h5 class="fw-bold mb-0">Latest official reports</h5></div><span class="fd-meta">Government wholesale data</span></div>
+      {% if markets %}
+      <div class="table-responsive"><table class="table align-middle fd-market-table"><thead><tr><th>Date</th><th>Mandi</th><th>State</th><th>Source</th><th>Variety</th><th>Min/kg</th><th>Modal/kg</th><th>Max/kg</th></tr></thead><tbody>
+        {% for m in markets %}<tr><td>{{ m.arrival_date }}</td><td><b>{{ m.market or '—' }}</b><small>{{ m.district or '' }}</small></td><td>{{ m.state or '—' }}</td><td><span class="fd-market-table-source">{{ m.source|replace(' · Government of India','')|replace(' · Ministry of Agriculture','')|replace(' · Government of Tamil Nadu','') }}</span></td><td>{{ m.variety or 'Other' }}</td><td>₹{{ '%g'|format(m.min_price_kg or m.modal_price_kg) }}</td><td><span class="fd-market-modal-cell">₹{{ '%g'|format(m.modal_price_kg) }}</span></td><td>₹{{ '%g'|format(m.max_price_kg or m.modal_price_kg) }}</td></tr>{% endfor %}
+      </tbody></table></div>
+      {% else %}<div class="fd-market-empty-table"><i class="bi bi-database"></i><span>No official mandi rows cached for this selection yet.</span></div>{% endif %}
+    </div>
+
+    <div class="fd-market-trust-note"><i class="bi bi-info-circle"></i><div><b>Important:</b> agricultural market feeds update on the reporting cadence of the participating mandi/portal; FarmDirect therefore shows the source and reporting date instead of pretending these are second-by-second exchange quotes. If every provider is temporarily unavailable, the last verified official observation remains available offline and is marked CACHED.</div></div>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+{% if series %}
+<script>
+(() => {
+  const el = document.getElementById('mandiTrendChart');
+  if (!el || typeof Chart === 'undefined') return;
+  const rows = {{ series|tojson }};
+  new Chart(el, {
+    type: 'line',
+    data: { labels: rows.map(r => r.arrival_date), datasets: [
+      { label: 'Modal ₹/kg', data: rows.map(r => r.modal), tension: .38, borderWidth: 3, pointRadius: 4, pointHoverRadius: 7, fill: true, backgroundColor: 'rgba(32,166,88,.08)' },
+      { label: 'Min ₹/kg', data: rows.map(r => r.low), tension: .34, borderWidth: 1.5, pointRadius: 0 },
+      { label: 'Max ₹/kg', data: rows.map(r => r.high), tension: .34, borderWidth: 1.5, pointRadius: 0 }
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: 'index' }, plugins: { legend: { position: 'bottom' } }, scales: { y: { beginAtZero: false, grid: { color: 'rgba(20,70,42,.06)' } }, x: { grid: { display: false } } } }
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

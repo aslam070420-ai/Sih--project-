@@ -1,0 +1,50 @@
+{# Reusable product card — expects `p` with seller_name, city #}
+{% set meta = CROP_META.get(p['crop'], {'icon':'🌾','grad':'linear-gradient(135deg,#d5e8d8,#a8cbae)'}) %}
+{% set mandi = p.mandi|default(None) %}
+{% set seller_role = p.seller_role|default('farmer') %}
+<div class="col-12 col-sm-6 col-xl-4" data-product-card>
+  <article class="fd-card fd-card-hover fd-product-card fd-product-card-v9 d-flex flex-column">
+    <a href="{{ url_for('views.product_detail', pid=p['id']) }}" class="text-decoration-none fd-product-media-link" aria-label="View {{ p['name'] }}">
+      <div class="fd-product-img fd-product-img-v9" style="background:{{ meta.grad }}">
+        <span class="fd-product-gridlines" aria-hidden="true"></span>
+        <span class="fd-product-orbit fd-product-orbit-a" aria-hidden="true"></span>
+        <span class="fd-product-orbit fd-product-orbit-b" aria-hidden="true"></span>
+        <span class="fd-product-icon-v9 fd-product-icon-art" aria-hidden="true">{{ crop_mark(p['crop'], 'lg') }}</span>
+        <span class="fd-grade-badge">Grade {{ p['grade'] }}</span>
+        {% if p['organic'] %}<span class="fd-organic-badge">🌿 Organic</span>{% endif %}
+        {% if mandi %}
+        <span class="fd-mandi-badge fd-mandi-{{ mandi.status }}"><i class="bi bi-broadcast-pin"></i> {{ 'Official' if mandi.status == 'official' else 'Cached' }} ₹{{ '%g'|format(mandi.modal) }}/kg</span>
+        {% endif %}
+        <span class="fd-product-media-sheen" aria-hidden="true"></span>
+      </div>
+    </a>
+    <div class="p-3 p-lg-4 d-flex flex-column flex-grow-1 fd-product-body-v9">
+      <div class="fd-product-title-row">
+        <a href="{{ url_for('views.product_detail', pid=p['id']) }}" class="text-decoration-none text-body">
+          <h6 class="mb-1 fw-bold">{{ p['name'] }}</h6>
+        </a>
+        <span class="fd-product-live-dot" title="Live listing"><i></i></span>
+      </div>
+      <div class="fd-product-seller">
+        <span class="fd-product-seller-icon"><i class="bi bi-person-badge"></i></span>
+        <div><b>{{ p['seller_name'] }}{% if seller_role == 'fpo' %} · FPO{% endif %}</b><small>{{ p['city'] }} · Same/Next day</small></div>
+      </div>
+      <div class="fd-product-divider"></div>
+      <div class="fd-product-price-row mt-auto">
+        <div>
+          <div class="fd-price">₹{{ '%g'|format(p['price_per_kg']) }}<span class="fd-meta">/kg</span></div>
+          <div class="fd-product-stock"><i class="bi bi-box-seam"></i> {{ p['quantity_kg']|kg }} available</div>
+        </div>
+        <span class="fd-product-location"><i class="bi bi-geo-alt"></i></span>
+      </div>
+      <div class="fd-product-actions mt-3">
+        {% if g.role in (None, 'consumer') %}
+        <button class="btn btn-fd btn-sm" onclick="addToCart({{ p['id'] }}, {{ p['quantity_kg'] < 5 and p['quantity_kg'] or 2 }})">
+          <i class="bi bi-cart-plus"></i> Add
+        </button>
+        {% endif %}
+        <a class="btn btn-fd-outline btn-sm" href="{{ url_for('views.product_detail', pid=p['id']) }}">Buy Now <i class="bi bi-arrow-up-right ms-1"></i></a>
+      </div>
+    </div>
+  </article>
+</div>

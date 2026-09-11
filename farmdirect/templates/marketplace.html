@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Marketplace{% endblock %}
+{% block content %}
+<section class="fd-market-stage">
+  <div class="fd-market-aurora fd-market-aurora-a" aria-hidden="true"></div>
+  <div class="fd-market-aurora fd-market-aurora-b" aria-hidden="true"></div>
+  <div class="container py-4 py-lg-5 fd-market-shell">
+    <div class="fd-market-hero mb-4">
+      <div class="fd-market-hero-copy">
+        <span class="fd-market-eyebrow"><i class="bi bi-shop-window"></i> Marketplace</span>
+        <h2 class="fd-section-title mb-1">Fresh produce marketplace</h2>
+        <span class="fd-subtle">{{ total_products }} listings from verified farmers &amp; FPOs</span>
+      </div>
+      <div class="fd-market-hero-search">
+        <i class="bi bi-search"></i>
+        <input class="form-control" placeholder="Quick filter…" oninput="quickFilter(this)" aria-label="Quick filter marketplace">
+        <span class="fd-market-search-glow" aria-hidden="true"></span>
+      </div>
+    </div>
+
+    <div class="fd-market-live-strip mb-4">
+      <div class="fd-market-live-status">
+        <span class="fd-live-market-dot"></span>
+        <div><b>Official Mandi Intelligence</b><small>AGMARKNET 2.0 keyless sync · {{ market_status.cached_crops }} crops cached</small></div>
+      </div>
+      <a class="btn btn-fd-outline btn-sm" href="{{ url_for('views.market_intelligence') }}"><i class="bi bi-activity"></i> Open Market Intelligence</a>
+    </div>
+
+    <div class="row g-4 align-items-start">
+      <!-- Filters sidebar -->
+      <div class="col-lg-3 fd-market-sidebar-col">
+        <div class="fd-card fd-market-filter-card p-3 p-xl-4 mb-3">
+          <div class="fd-market-filter-title">
+            <span class="fd-market-filter-icon"><i class="bi bi-sliders2"></i></span>
+            <div><h6 class="fw-bold mb-0">Filters</h6></div>
+          </div>
+          <form method="get" class="fd-market-filter-form">
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">SEARCH</label>
+              <div class="fd-filter-input"><i class="bi bi-search"></i><input class="form-control" name="q" value="{{ filters.q }}" placeholder="Tomato, FPO name…"></div>
+            </div>
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">CATEGORY</label>
+              <select class="form-select" name="category">
+                <option value="">All categories</option>
+                {% for cat in categories %}<option value="{{ cat }}" {% if filters.category == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
+              </select>
+            </div>
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">CROP / PRODUCT</label>
+              <select class="form-select" name="crop">
+                <option value="">All crops</option>
+                {% for c in crops %}<option value="{{ c }}" {% if filters.crop == c %}selected{% endif %}>{{ CROP_META.get(c, {}).get('icon', '🌾') }} {{ c }}</option>{% endfor %}
+              </select>
+            </div>
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">FARM LOCATION</label>
+              <select class="form-select" name="city">
+                <option value="">All locations</option>
+                {% for c in cities %}<option value="{{ c }}" {% if filters.city == c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+              </select>
+            </div>
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">QUALITY GRADE</label>
+              <div class="fd-grade-picker">
+                {% for gr in ['A','B','C'] %}
+                <input type="radio" class="btn-check" name="grade" id="g{{ gr }}" value="{{ gr }}" {% if filters.grade == gr %}checked{% endif %}>
+                <label class="btn btn-fd-outline btn-sm" for="g{{ gr }}">{{ gr }}</label>
+                {% endfor %}
+                <input type="radio" class="btn-check" name="grade" id="gall" value="" {% if not filters.grade %}checked{% endif %}>
+                <label class="btn btn-fd-outline btn-sm" for="gall">Any</label>
+              </div>
+            </div>
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">MAX PRICE (₹/kg)</label>
+              <div class="fd-filter-input"><i class="bi bi-currency-rupee"></i><input type="number" class="form-control" name="max_price" value="{{ filters.max_price }}" placeholder="e.g. 40" min="1"></div>
+            </div>
+            <div class="mb-3 fd-filter-field">
+              <label class="form-label tiny-note fw-bold">SORT BY</label>
+              <select class="form-select" name="sort">
+                <option value="recent" {% if filters.sort == 'recent' %}selected{% endif %}>Newest first</option>
+                <option value="price_asc" {% if filters.sort == 'price_asc' %}selected{% endif %}>Price: low → high</option>
+                <option value="price_desc" {% if filters.sort == 'price_desc' %}selected{% endif %}>Price: high → low</option>
+                <option value="qty" {% if filters.sort == 'qty' %}selected{% endif %}>Quantity available</option>
+              </select>
+            </div>
+            <button class="btn btn-fd w-100 fd-filter-apply"><i class="bi bi-search me-1"></i> Apply filters</button>
+            <a href="{{ url_for('views.marketplace') }}" class="btn btn-link w-100 btn-sm mt-1">Reset</a>
+          </form>
+        </div>
+        {% if g.role in ('farmer','fpo') %}
+        <div class="fd-card fd-market-sell-card p-3">
+          <div class="fd-market-sell-icon">🌾</div>
+          <h6 class="fw-bold mb-1">Selling something?</h6>
+          <p class="tiny-note mb-2">Publish a new listing in under 2 minutes.</p>
+          <a href="{{ url_for('views.add_listing') }}" class="btn btn-fd btn-sm w-100">+ Add Produce</a>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Results -->
+      <div class="col-lg-9 fd-market-results-col">
+        <div class="fd-market-toolbar mb-3">
+          <span class="fd-market-toolbar-orb" aria-hidden="true"></span>
+          <button type="button" class="btn btn-fd-outline fd-mobile-filter-trigger d-lg-none" data-fd-filter-toggle><i class="bi bi-sliders"></i> Filters</button>
+          <div class="ms-auto fd-meta">Showing {{ ((page - 1) * per_page) + 1 if total_products else 0 }}–{{ [page * per_page, total_products]|min }} of {{ total_products }}</div>
+        </div>
+
+        {% if products %}
+        <div class="row g-3 g-xl-4 fd-market-grid">
+          {% for p in products %}
+            {% include "partials/product_card.html" %}
+          {% endfor %}
+        </div>
+        {% if total_pages > 1 %}
+        <nav class="mt-4" aria-label="Marketplace pages">
+          <ul class="pagination justify-content-center flex-wrap gap-1">
+            <li class="page-item {% if page <= 1 %}disabled{% endif %}"><a class="page-link" href="{{ url_for('views.marketplace', page=page-1, q=filters.q, crop=filters.crop, category=filters.category, city=filters.city, grade=filters.grade, max_price=filters.max_price, sort=filters.sort) }}">‹</a></li>
+            {% for n in range([1, page-2]|max, ([total_pages, page+2]|min) + 1) %}
+            <li class="page-item {% if n == page %}active{% endif %}"><a class="page-link" href="{{ url_for('views.marketplace', page=n, q=filters.q, crop=filters.crop, category=filters.category, city=filters.city, grade=filters.grade, max_price=filters.max_price, sort=filters.sort) }}">{{ n }}</a></li>
+            {% endfor %}
+            <li class="page-item {% if page >= total_pages %}disabled{% endif %}"><a class="page-link" href="{{ url_for('views.marketplace', page=page+1, q=filters.q, crop=filters.crop, category=filters.category, city=filters.city, grade=filters.grade, max_price=filters.max_price, sort=filters.sort) }}">›</a></li>
+          </ul>
+        </nav>
+        {% endif %}
+        {% else %}
+        <div class="fd-card fd-market-empty p-5 text-center">
+          <div class="fd-market-empty-icon">🔍</div>
+          <h5 class="fw-bold mt-2">No produce matches those filters</h5>
+          <p class="fd-subtle">Try widening your search — or check back after the next harvest.</p>
+          <a href="{{ url_for('views.marketplace') }}" class="btn btn-fd-outline">Clear filters</a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
