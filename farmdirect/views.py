@@ -1,0 +1,877 @@
+"""Page routes (server-rendered Jinja) for all 16 screens."""
+from datetime import datetime, timedelta
+from functools import lru_cache
+from math import asin, cos, radians, sin, sqrt
+import json
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from flask import (Blueprint, abort, flash, g, jsonify, redirect, render_template,
+                   request, session, url_for)
+
+import db
+from auth import login_required, role_required
+
+bp = Blueprint("views", __name__)
+
+
+# ---------------------------------------------------------------- Landing
+@bp.route("/")
+def landing():
+    stats = {
+        "farmers": db.query("SELECT COUNT(*) n FROM users WHERE role IN ('farmer','fpo')", one=True)["n"],
+        "products": db.query("SELECT COUNT(*) n FROM products WHERE status='active'", one=True)["n"],
+        "orders": db.query("SELECT COUNT(*) n FROM orders", one=True)["n"],
+        "saved_pct": 34,
+    }
+    featured = [dict(r) for r in db.query(
+        "SELECT p.*, u.name AS seller_name, u.city, u.state, u.role AS seller_role "
+        "FROM products p JOIN users u ON u.id=p.seller_id "
+        "WHERE p.status='active' ORDER BY p.id LIMIT 8")]
+    try:
+        import market_sync
+        for product in featured:
+            product["mandi"] = market_sync.get_reference_price(product["crop"], product.get("state"))
+            market_sync.queue_crops([product["crop"]], state=product.get("state"))
+    except Exception:
+        pass
+    return render_template("landing.html", stats=stats, featured=featured)
+
+
+# ---------------------------------------------------------------- Location lookup
+@lru_cache(maxsize=256)
+def _nominatim_cached(path, query):
+    """Cache repeated geocoder lookups for the lifetime of this process."""
+    req = Request(
+        f"https://nominatim.openstreetmap.org/{path}?{query}",
+        headers={
+            "User-Agent": "FarmDirect-SIH-Hackathon/1.0",
+            "Accept": "application/json",
+            "Accept-Language": "en",
+        },
+    )
+    with urlopen(req, timeout=7) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _nominatim_json(path, params):
+    """Small, keyless India-only location lookup for the marketplace selector."""
+    # Stable ordering lets equivalent searches hit the in-process cache.
+    query = urlencode(sorted(params.items()))
+    return _nominatim_cached(path, query)
+
+
+def _compact_india_location(item):
+    address = item.get("address") or {}
+    parts = []
+    primary = (item.get("name") or address.get("amenity") or address.get("road") or
+               address.get("suburb") or address.get("neighbourhood") or
+               address.get("village") or address.get("town") or address.get("city"))
+    if primary:
+        parts.append(str(primary))
+    for key in ("village", "town", "city", "municipality", "county", "state_district", "state", "postcode"):
+        value = address.get(key)
+        if value and str(value) not in parts:
+            parts.append(str(value))
+    label = ", ".join(parts[:5])
+    return label or str(item.get("display_name") or "Selected location")[:180]
+
+
+@bp.route("/api/locations/search")
+def location_search():
+    q = request.args.get("q", "").strip()
+    if len(q) < 2:
+        return jsonify({"results": []})
+    try:
+        data = _nominatim_json("search", {
+            "q": q,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "countrycodes": "in",
+            "limit": 8,
+        })
+        results = []
+        for item in data:
+            try:
+                lat = float(item["lat"])
+                lng = float(item["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            results.append({
+                "name": _compact_india_location(item),
+                "display_name": str(item.get("display_name") or "")[:240],
+                "lat": round(lat, 6),
+                "lng": round(lng, 6),
+            })
+        return jsonify({"results": results})
+    except Exception:
+        return jsonify({"results": [], "error": "Location search is temporarily unavailable."}), 503
+
+
+@bp.route("/api/locations/reverse")
+def location_reverse():
+    try:
+        lat = float(request.args.get("lat", ""))
+        lng = float(request.args.get("lng", ""))
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid coordinates."}), 400
+    try:
+        item = _nominatim_json("reverse", {
+            "lat": lat,
+            "lon": lng,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "zoom": 18,
+        })
+        address = item.get("address") or {}
+        if str(address.get("country_code") or "").lower() != "in":
+            return jsonify({"error": "Please select a location in India."}), 400
+        return jsonify({
+            "name": _compact_india_location(item),
+            "display_name": str(item.get("display_name") or "")[:240],
+            "lat": round(lat, 6),
+            "lng": round(lng, 6),
+        })
+    except Exception:
+        return jsonify({"error": "Could not resolve this location right now."}), 503
+
+
+# ---------------------------------------------------------------- Marketplace
+@bp.route("/marketplace")
+def marketplace():
+    crops = [r["crop"] for r in db.query(
+        "SELECT DISTINCT crop FROM products WHERE status='active' ORDER BY crop")]
+    categories = [r["category"] for r in db.query(
+        "SELECT DISTINCT category FROM products WHERE status='active' ORDER BY category")]
+    cities = [r["city"] for r in db.query(
+        "SELECT DISTINCT city FROM users WHERE role IN ('farmer','fpo') ORDER BY city")]
+    q = request.args.get("q", "").strip()
+    crop = request.args.get("crop", "")
+    category = request.args.get("category", "")
+    city = request.args.get("city", "")
+    grade = request.args.get("grade", "")
+    max_price = request.args.get("max_price", "")
+    sort = request.args.get("sort", "recent")
+    radius = request.args.get("radius", "25")
+    location_name = request.args.get("location_name", "").strip()[:180]
+
+    def _coord(name, minimum, maximum):
+        try:
+            value = float(request.args.get(name, ""))
+            return value if minimum <= value <= maximum else None
+        except (TypeError, ValueError):
+            return None
+
+    loc_lat = _coord("lat", -90, 90)
+    loc_lng = _coord("lng", -180, 180)
+    try:
+        radius_km = max(1.0, min(float(radius), 500.0))
+    except (TypeError, ValueError):
+        radius_km = 25.0
+    location_active = loc_lat is not None and loc_lng is not None
+
+    try:
+        page = max(int(request.args.get("page", 1)), 1)
+    except (TypeError, ValueError):
+        page = 1
+    per_page = 24
+
+    where = " FROM products p JOIN users u ON u.id=p.seller_id WHERE p.status='active'"
+    args = []
+    if q:
+        where += " AND (p.name LIKE ? OR p.crop LIKE ? OR p.category LIKE ? OR u.name LIKE ?)"
+        args += [f"%{q}%"] * 4
+    if crop:
+        where += " AND p.crop=?"
+        args.append(crop)
+    if category:
+        where += " AND p.category=?"
+        args.append(category)
+    if city:
+        where += " AND u.city=?"
+        args.append(city)
+    if grade:
+        where += " AND p.grade=?"
+        args.append(grade)
+    if max_price:
+        try:
+            where += " AND p.price_per_kg<=?"
+            args.append(float(max_price))
+        except ValueError:
+            pass
+
+    select_sql = ("SELECT p.*, u.name AS seller_name, u.role AS seller_role, u.city, u.state, u.lat, u.lng, "
+                  "(SELECT rating FROM farmers f WHERE f.user_id=p.seller_id) AS rating" + where)
+
+    if location_active:
+        # Cheap SQL bounding-box prefilter first, then exact Haversine distance.
+        # The result set is identical for the selected radius, but we avoid
+        # loading every active product into Python when the catalogue grows.
+        lat_delta = radius_km / 111.32
+        cos_lat = max(0.01, abs(cos(radians(loc_lat))))
+        lng_delta = radius_km / (111.32 * cos_lat)
+        nearby_sql = select_sql + (
+            " AND u.lat IS NOT NULL AND u.lng IS NOT NULL"
+            " AND u.lat BETWEEN ? AND ? AND u.lng BETWEEN ? AND ?"
+        )
+        nearby_args = list(args) + [
+            max(-90.0, loc_lat - lat_delta), min(90.0, loc_lat + lat_delta),
+            max(-180.0, loc_lng - lng_delta), min(180.0, loc_lng + lng_delta),
+        ]
+        rows = [dict(r) for r in db.query(nearby_sql, nearby_args)]
+
+        def haversine_km(lat1, lng1, lat2, lng2):
+            dlat = radians(lat2 - lat1)
+            dlng = radians(lng2 - lng1)
+            a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+            return 6371.0088 * 2 * asin(sqrt(a))
+
+        products_all = []
+        for product in rows:
+            if product.get("lat") is None or product.get("lng") is None:
+                continue
+            product["distance_km"] = round(haversine_km(loc_lat, loc_lng, float(product["lat"]), float(product["lng"])), 1)
+            if product["distance_km"] <= radius_km:
+                products_all.append(product)
+
+        if sort == "distance":
+            products_all.sort(key=lambda p: (p["distance_km"], -p["id"]))
+        elif sort == "price_asc":
+            products_all.sort(key=lambda p: (p["price_per_kg"], p["distance_km"]))
+        elif sort == "price_desc":
+            products_all.sort(key=lambda p: (-p["price_per_kg"], p["distance_km"]))
+        elif sort == "qty":
+            products_all.sort(key=lambda p: (-p["quantity_kg"], p["distance_km"]))
+        else:
+            products_all.sort(key=lambda p: -p["id"])
+
+        total = len(products_all)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        offset = (page - 1) * per_page
+        products = products_all[offset:offset + per_page]
+    else:
+        total = db.query("SELECT COUNT(*) AS n" + where, args, one=True)["n"]
+        total_pages = max(1, (int(total) + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        offset = (page - 1) * per_page
+        order = {"recent": "p.id DESC", "price_asc": "p.price_per_kg ASC",
+                 "price_desc": "p.price_per_kg DESC", "qty": "p.quantity_kg DESC"}.get(sort, "p.id DESC")
+        products = [dict(r) for r in db.query(select_sql + f" ORDER BY {order} LIMIT ? OFFSET ?", list(args) + [per_page, offset])]
+
+    try:
+        import market_sync
+        ref_cache = {}
+        for product in products:
+            c = product["crop"]
+            st = product.get("state") or None
+            key = (c, st)
+            if key not in ref_cache:
+                ref_cache[key] = market_sync.get_reference_price(c, st)
+            product["mandi"] = ref_cache[key]
+        market_status = market_sync.status_summary()
+        for c, st in ref_cache:
+            market_sync.queue_crops([c], state=st)
+    except Exception:
+        market_status = {"configured": False, "cached_rows": 0, "cached_crops": 0}
+    cart_count = _cart_count()
+    return render_template("marketplace.html", products=products, crops=crops,
+                           categories=categories, cities=cities, total_products=int(total),
+                           page=page, total_pages=total_pages, per_page=per_page,
+                           filters={"q": q, "crop": crop, "category": category, "city": city,
+                                    "grade": grade, "max_price": max_price, "sort": sort,
+                                    "lat": loc_lat if location_active else "",
+                                    "lng": loc_lng if location_active else "",
+                                    "radius": ('%g' % radius_km),
+                                    "location_name": location_name},
+                           location_active=location_active, market_status=market_status, cart_count=cart_count)
+
+
+
+# ---------------------------------------------------------------- Official market intelligence
+@bp.route("/market-intelligence", methods=["GET", "POST"])
+def market_intelligence():
+    from ai.pricing import recommend_price
+    import market_sync
+    from india_catalog import CROP_NAMES
+
+    crop = request.values.get("crop", "Tomato").strip() or "Tomato"
+    if crop not in CROP_NAMES:
+        crop = "Tomato"
+    state = request.values.get("state", "").strip() or None
+    sync_result = None
+
+    # A POST is an explicit judge/user refresh. GET remains fast and reads the
+    # local verified cache, with one lazy refresh when no record exists yet.
+    if request.method == "POST":
+        sync_result = market_sync.sync_crop(crop, state=state, force=True, limit=200)
+        if sync_result.get("ok"):
+            flash(f"Official mandi data refreshed for {crop} via {sync_result.get('source') or sync_result.get('provider') or 'verified provider'}.", "success")
+        else:
+            flash("Official sources could not be refreshed. FarmDirect is keeping the last verified cache instead of inventing a price.", "warning")
+    elif market_sync.is_configured() and not market_sync.get_reference_price(crop, state):
+        # Never block first paint on a government network request. The daemon
+        # fills the verified cache and live-market.js updates this page in place.
+        market_sync.queue_crops([crop], state=state)
+
+    reference = market_sync.get_reference_price(crop, state)
+    series = market_sync.get_recent_series(crop, state, days=14)
+    markets = market_sync.get_market_rows(crop, state, limit=18)
+    status = market_sync.status_summary()
+
+    # AI fair-price card uses the same official reference when present.
+    rec = recommend_price(crop, "A", 100, None, state=state)
+    states = [r["state"] for r in db.query(
+        "SELECT DISTINCT state FROM users WHERE state IS NOT NULL AND TRIM(state)<>'' ORDER BY state")]
+    cached_states = [r["state"] for r in db.query(
+        "SELECT DISTINCT state FROM mandi_prices WHERE state IS NOT NULL AND TRIM(state)<>'' ORDER BY state")]
+    states = sorted(set(states + cached_states))
+
+    return render_template("market_intelligence.html", crop=crop, state=state, crops=CROP_NAMES,
+                           states=states, reference=reference, series=series, markets=markets,
+                           market_status=status, rec=rec, sync_result=sync_result,
+                           cart_count=_cart_count())
+
+
+def _cart_count():
+    if not g.get("user") or g.get("role") != "consumer":
+        return 0
+    cached = g.get("_farmdirect_cart_count")
+    if cached is not None:
+        return cached
+    row = db.query("SELECT COALESCE(SUM(quantity_kg),0) n FROM cart_items WHERE user_id=?",
+                   (g.user["id"],), one=True)
+    count = row["n"] if row else 0
+    g._farmdirect_cart_count = count
+    return count
+
+
+# ---------------------------------------------------------------- Product detail
+@bp.route("/product/<int:pid>")
+def product_detail(pid):
+    from ai.pricing import recommend_price
+    p = db.query(
+        "SELECT p.*, u.name AS seller_name, u.role AS seller_role, u.city, u.state, "
+        "u.created_at AS member_since "
+        "FROM products p JOIN users u ON u.id=p.seller_id WHERE p.id=?", (pid,), one=True)
+    if not p:
+        abort(404)
+    if p["seller_role"] == "fpo":
+        profile = db.query("SELECT * FROM fpos WHERE user_id=?", (p["seller_id"],), one=True)
+        p = dict(p)
+        p["org_name"] = profile["fpo_name"] if profile else None
+        p["member_count"] = profile["member_count"] if profile else None
+        p["bio"] = profile["description"] if profile else None
+        p["rating"] = 4.7
+    else:
+        profile = db.query("SELECT * FROM farmers WHERE user_id=?", (p["seller_id"],), one=True)
+        p = dict(p)
+        p["org_name"] = profile["farm_name"] if profile else None
+        p["farm_size_acres"] = profile["farm_size_acres"] if profile else None
+        p["bio"] = profile["bio"] if profile else None
+        p["rating"] = profile["rating"] if profile else 4.5
+
+    rec = recommend_price(p["crop"], p["grade"], p["quantity_kg"], p["city"],
+                          current_price=p["price_per_kg"], organic=bool(p["organic"]),
+                          state=p.get("state"))
+    similar = [dict(r) for r in db.query(
+        "SELECT p.*, u.name AS seller_name, u.city, u.state, u.role AS seller_role "
+        "FROM products p JOIN users u ON u.id=p.seller_id "
+        "WHERE p.crop=? AND p.id<>? AND p.status='active' LIMIT 4", (p["crop"], pid))]
+    try:
+        import market_sync
+        for item in similar:
+            item["mandi"] = market_sync.get_reference_price(item["crop"], item.get("state"))
+            market_sync.queue_crops([item["crop"]], state=item.get("state"))
+    except Exception:
+        pass
+    return render_template("product_detail.html", p=p, rec=rec, similar=similar,
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Cart & checkout
+@bp.route("/cart")
+@login_required
+def cart():
+    items = db.query(
+        "SELECT c.id, c.quantity_kg, p.id AS product_id, p.name, p.crop, p.grade, "
+        "p.price_per_kg, p.organic, p.quantity_kg AS available, u.name AS seller, u.city "
+        "FROM cart_items c JOIN products p ON p.id=c.product_id JOIN users u ON u.id=p.seller_id "
+        "WHERE c.user_id=? ORDER BY c.id", (g.user["id"],))
+    subtotal = sum(i["price_per_kg"] * i["quantity_kg"] for i in items)
+    fee = round(subtotal * 0.06, 0) if items else 0
+    dfee = 25 if items else 0
+    return render_template("cart.html", items=items, subtotal=subtotal,
+                           platform_fee=fee, delivery_fee=dfee,
+                           total=subtotal + fee + dfee, cart_count=_cart_count())
+
+
+@bp.route("/checkout", methods=["GET", "POST"])
+@login_required
+def checkout():
+    items = db.query(
+        "SELECT c.id, c.quantity_kg, p.id AS product_id, p.name, p.crop, p.grade, p.price_per_kg "
+        "FROM cart_items c JOIN products p ON p.id=c.product_id WHERE c.user_id=?", (g.user["id"],))
+    if not items:
+        flash("Your cart is empty.", "info")
+        return redirect(url_for("views.marketplace"))
+    subtotal = sum(i["price_per_kg"] * i["quantity_kg"] for i in items)
+    fee = round(subtotal * 0.06, 0)
+    dfee = 25
+    if request.method == "POST":
+        from api import place_order  # shared order engine
+        oid, err = place_order(
+            g.user["id"],
+            [(i["product_id"], i["quantity_kg"]) for i in items],
+            request.form.get("address", ""), request.form.get("city", "Nashik"),
+            request.form.get("pincode", ""), request.form.get("pay_method", "UPI"))
+        if err:
+            flash(err, "danger")
+            return redirect(url_for("views.checkout"))
+        db.execute("DELETE FROM cart_items WHERE user_id=?", (g.user["id"],))
+        order = db.query("SELECT order_code FROM orders WHERE id=?", (oid,), one=True)
+        flash(f"Order {order['order_code']} placed successfully! 🎉", "success")
+        return redirect(url_for("views.track_order", oid=oid))
+    return render_template("checkout.html", items=items, subtotal=subtotal,
+                           platform_fee=fee, delivery_fee=dfee,
+                           total=subtotal + fee + dfee,
+                           user=g.user, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Orders & tracking
+@bp.route("/orders")
+@login_required
+def my_orders():
+    orders = db.query(
+        "SELECT o.*, (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id=o.id) AS n_items "
+        "FROM orders o WHERE o.buyer_id=? ORDER BY o.id DESC", (g.user["id"],))
+    return render_template("orders.html", orders=orders, cart_count=_cart_count())
+
+
+@bp.route("/track/<int:oid>")
+@login_required
+def track_order(oid):
+    o = db.query(
+        "SELECT o.*, u.name AS buyer_name FROM orders o JOIN users u ON u.id=o.buyer_id "
+        "WHERE o.id=?", (oid,), one=True)
+    if not o or (o["buyer_id"] != g.user["id"] and g.role not in ("admin",)):
+        abort(404)
+    items = db.query(
+        "SELECT oi.*, p.name AS product_name, u.name AS seller FROM order_items oi "
+        "JOIN products p ON p.id=oi.product_id JOIN users u ON u.id=oi.farmer_id "
+        "WHERE oi.order_id=?", (oid,))
+    dlv = db.query("SELECT * FROM deliveries WHERE order_id=?", (oid,), one=True)
+    pay = db.query("SELECT * FROM payments WHERE order_id=?", (oid,), one=True)
+    return render_template("track.html", o=o, items=items, dlv=dlv, pay=pay,
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Consumer dashboard
+@bp.route("/consumer/dashboard")
+@role_required("consumer")
+def consumer_dashboard():
+    uid = g.user["id"]
+    orders = db.query(
+        "SELECT * FROM orders WHERE buyer_id=? ORDER BY id DESC LIMIT 5", (uid,))
+    totals = db.query(
+        "SELECT COUNT(*) n_orders, COALESCE(SUM(total_amount),0) spent FROM orders "
+        "WHERE buyer_id=? AND status<>'cancelled'", (uid,), one=True)
+    active = db.query(
+        "SELECT COUNT(*) n FROM orders WHERE buyer_id=? AND status IN "
+        "('pending','confirmed','picked_up','in_transit')", (uid,), one=True)["n"]
+    picks = db.query(
+        "SELECT p.*, u.name AS seller_name, u.city FROM products p "
+        "JOIN users u ON u.id=p.seller_id WHERE p.status='active' "
+        "ORDER BY (p.organic) DESC, p.id DESC LIMIT 4")
+    return render_template("consumer/dashboard.html", orders=orders,
+                           totals=totals, active=active, picks=picks,
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Farmer dashboard
+@bp.route("/farmer/dashboard")
+@role_required("farmer", "fpo")
+def farmer_dashboard():
+    from ai.forecasting import top_opportunities
+    uid = g.user["id"]
+    kpi = db.query(
+        "SELECT COALESCE(SUM(subtotal),0) revenue, COUNT(*) n_items FROM order_items "
+        "WHERE farmer_id=? AND item_status='accepted'", (uid,), one=True)
+    pending_items = db.query(
+        "SELECT oi.*, o.order_code, o.created_at, p.name AS product_name, u.name AS buyer, "
+        "o.delivery_city FROM order_items oi JOIN orders o ON o.id=oi.order_id "
+        "JOIN products p ON p.id=oi.product_id JOIN users u ON u.id=o.buyer_id "
+        "WHERE oi.farmer_id=? AND oi.item_status='pending' ORDER BY o.id DESC", (uid,))
+    listings = db.query(
+        "SELECT * FROM products WHERE seller_id=? AND status<>'removed' ORDER BY id DESC", (uid,))
+    monthly = db.query(
+        "SELECT substr(o.created_at,1,7) ym, SUM(oi.subtotal) amt FROM order_items oi "
+        "JOIN orders o ON o.id=oi.order_id WHERE oi.farmer_id=? AND oi.item_status='accepted' "
+        "GROUP BY ym ORDER BY ym DESC LIMIT 6", (uid,))
+    monthly = list(reversed([dict(r) for r in monthly]))
+    opps = top_opportunities(4)
+    live_orders = db.query(
+        "SELECT oi.*, o.order_code, o.status AS order_status, u.name AS buyer, o.delivery_city "
+        "FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN users u ON u.id=o.buyer_id "
+        "WHERE oi.farmer_id=? AND oi.item_status='accepted' AND o.status IN "
+        "('confirmed','picked_up','in_transit') ORDER BY o.id DESC LIMIT 5", (uid,))
+    return render_template("farmer/dashboard.html", kpi=kpi, pending_items=pending_items,
+                           listings=listings, monthly=monthly, opps=opps,
+                           live_orders=live_orders, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Farmer orders
+@bp.route("/farmer/orders")
+@role_required("farmer", "fpo")
+def farmer_orders():
+    items = db.query(
+        "SELECT oi.*, o.order_code, o.status AS order_status, o.created_at, o.delivery_city, "
+        "o.delivery_address, u.name AS buyer, p.name AS product_name "
+        "FROM order_items oi JOIN orders o ON o.id=oi.order_id "
+        "JOIN users u ON u.id=o.buyer_id JOIN products p ON p.id=oi.product_id "
+        "WHERE oi.farmer_id=? ORDER BY o.id DESC", (g.user["id"],))
+    return render_template("farmer/orders.html", items=items, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Add listing
+@bp.route("/farmer/listings/new", methods=["GET", "POST"])
+@role_required("farmer", "fpo")
+def add_listing():
+    from ai.pricing import recommend_price
+    from india_catalog import CATEGORIES, CROP_BY_NAME, CROP_NAMES
+    if request.method == "POST":
+        f = request.form
+        crop = f.get("crop", "Tomato")
+        try:
+            qty = max(float(f.get("quantity_kg") or 0), 1)
+            price = max(float(f.get("price_per_kg") or 0), 0.5)
+        except ValueError:
+            flash("Please enter valid quantity and price.", "danger")
+            return redirect(url_for("views.add_listing"))
+        spec = CROP_BY_NAME.get(crop)
+        category = spec.category if spec else (f.get("category") or "Vegetables")
+        try:
+            farm_lat = float(f.get("lat")) if f.get("lat") not in (None, "") else None
+            farm_lng = float(f.get("lng")) if f.get("lng") not in (None, "") else None
+            if farm_lat is not None and farm_lng is not None and -90 <= farm_lat <= 90 and -180 <= farm_lng <= 180:
+                db.execute("UPDATE users SET lat=?, lng=? WHERE id=?", (farm_lat, farm_lng, g.user["id"]))
+        except (TypeError, ValueError):
+            pass
+        db.execute(
+            "INSERT INTO products (seller_id,crop,name,category,grade,quantity_kg,price_per_kg,"
+            "harvest_date,organic,description) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (g.user["id"], crop, f.get("name") or f"{crop} — {g.user['city']}",
+             category, f.get("grade", "A"), qty, price,
+             f.get("harvest_date") or datetime.now().strftime("%Y-%m-%d"),
+             1 if f.get("organic") else 0, f.get("description") or ""))
+        flash("Listing published! Buyers can now discover your produce. 🌾", "success")
+        return redirect(url_for("views.farmer_dashboard"))
+    try:
+        import market_sync
+        market_sync.queue_crops(["Tomato"], state=g.user["state"] if g.user else None)
+    except Exception:
+        pass
+    rec = recommend_price("Tomato", "A", 500, g.user["city"],
+                          state=g.user["state"] if g.user else None)
+    return render_template("farmer/listing_form.html", rec=rec, crop_names=CROP_NAMES,
+                           crop_categories=CATEGORIES, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Farmer earnings
+@bp.route("/farmer/earnings")
+@role_required("farmer", "fpo")
+def farmer_earnings():
+    from ai.pricing import recommend_price
+    uid = g.user["id"]
+    kpi = db.query(
+        "SELECT COALESCE(SUM(oi.subtotal),0) total_sales, COUNT(*) n_orders "
+        "FROM order_items oi WHERE oi.farmer_id=? AND oi.item_status='accepted'", (uid,), one=True)
+    paid = db.query(
+        "SELECT COALESCE(SUM(p.farmer_share),0) v FROM payments p WHERE p.farmer_id=? "
+        "AND p.status='completed'", (uid,), one=True)["v"]
+    pending = db.query(
+        "SELECT COALESCE(SUM(p.farmer_share),0) v FROM payments p WHERE p.farmer_id=? "
+        "AND p.status='pending'", (uid,), one=True)["v"]
+    avg_price = db.query(
+        "SELECT AVG(oi.unit_price) v FROM order_items oi WHERE oi.farmer_id=?", (uid,), one=True)["v"]
+    monthly = db.query(
+        "SELECT substr(o.created_at,1,7) ym, SUM(oi.subtotal) amt, COUNT(*) n "
+        "FROM order_items oi JOIN orders o ON o.id=oi.order_id "
+        "WHERE oi.farmer_id=? AND oi.item_status='accepted' GROUP BY ym ORDER BY ym", (uid,))
+    by_crop = db.query(
+        "SELECT oi.crop, SUM(oi.subtotal) amt, SUM(oi.quantity_kg) qty, AVG(oi.unit_price) avgp "
+        "FROM order_items oi WHERE oi.farmer_id=? GROUP BY oi.crop ORDER BY amt DESC", (uid,))
+    txns = db.query(
+        "SELECT p.*, o.order_code FROM payments p JOIN orders o ON o.id=p.order_id "
+        "WHERE p.farmer_id=? ORDER BY p.id DESC LIMIT 10", (uid,))
+    # Keep the supply-chain comparison tied to the same current official market
+    # price engine used everywhere else instead of a hard-coded Tomato demo value.
+    top_crop = by_crop[0]["crop"] if by_crop else None
+    if not top_crop:
+        active_crop = db.query(
+            "SELECT crop FROM products WHERE seller_id=? AND status='active' ORDER BY id DESC LIMIT 1",
+            (uid,), one=True)
+        top_crop = active_crop["crop"] if active_crop else "Tomato"
+    state = (g.user["state"] or None) if g.user else None
+    try:
+        import market_sync
+        market_sync.queue_crops([top_crop], state=state)
+    except Exception:
+        pass
+    live_rec = recommend_price(top_crop, "A", 100, g.user["city"] if g.user else None, state=state)
+    comparison = {
+        "crop": top_crop,
+        "mandi_price": live_rec["mandi_price"],
+        "suggested": live_rec["suggested_price"],
+        "consumer_direct": live_rec["consumer_price"],
+        "traditional_retail": live_rec["traditional_retail"],
+        "official_market": live_rec.get("official_market"),
+    }
+    comparison["farmer_share_traditional"] = round(
+        comparison["mandi_price"] / max(comparison["traditional_retail"], 1) * 100)
+    comparison["farmer_share_direct"] = round(
+        comparison["suggested"] / max(comparison["consumer_direct"], 1) * 100)
+    return render_template("farmer/earnings.html", kpi=kpi, paid=paid, pending=pending,
+                           avg_price=avg_price, monthly=[dict(m) for m in monthly],
+                           by_crop=by_crop, txns=txns, comparison=comparison,
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- AI: demand forecast
+@bp.route("/farmer/forecast")
+@role_required("farmer", "fpo", "admin")
+def forecast_page():
+    from ai.forecasting import forecast_crop
+    crop = request.args.get("crop", "Tomato")
+    horizon = int(request.args.get("horizon", 7))
+    fc = forecast_crop(crop, None, horizon)
+    crops = [r["crop"] for r in db.query(
+        "SELECT DISTINCT crop FROM sales_history ORDER BY crop")]
+    compare_rows = db.query(
+        "SELECT crop, AVG(quantity_kg) avg_qty FROM sales_history "
+        "WHERE date >= date((SELECT MAX(date) FROM sales_history), '-28 day') AND crop<>? "
+        "GROUP BY crop ORDER BY avg_qty DESC LIMIT 12", (crop,))
+    others = [forecast_crop(r["crop"], None, 7) for r in compare_rows]
+    return render_template("farmer/forecast.html", fc=fc, crop=crop, horizon=horizon,
+                           crops=crops, others=others, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- AI: price recommendation
+@bp.route("/farmer/price")
+@role_required("farmer", "fpo", "admin")
+def price_page():
+    from ai.pricing import recommend_price
+    crops = [r["crop"] for r in db.query(
+        "SELECT DISTINCT crop FROM sales_history ORDER BY crop")]
+    crop = request.args.get("crop", "Tomato")
+    grade = request.args.get("grade", "A")
+    qty = request.args.get("qty", "500")
+    try:
+        qty = float(qty)
+    except ValueError:
+        qty = 500
+    my_products = db.query(
+        "SELECT * FROM products WHERE seller_id=? AND status='active'", (g.user["id"],))
+    city = (g.user["city"] or "Nashik") if g.user else "Nashik"
+    state = (g.user["state"] or None) if g.user else None
+    try:
+        import market_sync
+        market_sync.queue_crops([crop], state=state)
+    except Exception:
+        pass
+    rec = recommend_price(crop, grade, qty, city, state=state)
+    return render_template("farmer/price.html", rec=rec, crop=crop, grade=grade, qty=qty,
+                           crops=crops, my_products=my_products, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Bulk buyer dashboard
+@bp.route("/buyer/dashboard")
+@role_required("buyer")
+def buyer_dashboard():
+    uid = g.user["id"]
+    bulk_products = db.query(
+        "SELECT p.*, u.name AS seller_name, u.city, u.role AS seller_role "
+        "FROM products p JOIN users u ON u.id=p.seller_id "
+        "WHERE p.status='active' AND p.quantity_kg>=500 ORDER BY p.quantity_kg DESC")
+    quotes = db.query("SELECT * FROM quotes WHERE buyer_id=? ORDER BY id DESC", (uid,))
+    quote_data = []
+    for q in quotes:
+        res = db.query(
+            "SELECT qr.*, u.name AS seller, u.city, u.role AS seller_role "
+            "FROM quote_responses qr JOIN users u ON u.id=qr.seller_id "
+            "WHERE qr.quote_id=? ORDER BY qr.price_per_kg", (q["id"],))
+        quote_data.append({"q": q, "responses": res})
+    orders = db.query(
+        "SELECT o.*, (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id=o.id) n_items "
+        "FROM orders o WHERE o.buyer_id=? ORDER BY o.id DESC LIMIT 6", (uid,))
+    kpi = db.query(
+        "SELECT COUNT(*) n_orders, COALESCE(SUM(total_amount),0) spent FROM orders "
+        "WHERE buyer_id=?", (uid,), one=True)
+    return render_template("buyer/dashboard.html", bulk_products=bulk_products,
+                           quote_data=quote_data, orders=orders, kpi=kpi,
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Logistics
+@bp.route("/logistics")
+@role_required("admin")
+def logistics_dashboard():
+    drivers = db.query(
+        "SELECT driver_name, driver_phone, vehicle, status, COUNT(*) n_jobs FROM deliveries "
+        "WHERE status IN ('confirmed','picked_up','in_transit') GROUP BY driver_name, driver_phone, vehicle, status")
+    pickups = db.query(
+        "SELECT d.*, o.order_code, o.delivery_city, o.order_type, u.name AS buyer "
+        "FROM deliveries d JOIN orders o ON o.id=d.order_id JOIN users u ON u.id=o.buyer_id "
+        "WHERE d.status='confirmed' ORDER BY d.id")
+    dropoffs = db.query(
+        "SELECT d.*, o.order_code, o.delivery_city, o.order_type, u.name AS buyer "
+        "FROM deliveries d JOIN orders o ON o.id=d.order_id JOIN users u ON u.id=o.buyer_id "
+        "WHERE d.status IN ('picked_up','in_transit') ORDER BY d.id")
+    recent = db.query(
+        "SELECT d.*, o.order_code FROM deliveries d JOIN orders o ON o.id=d.order_id "
+        "WHERE d.status='delivered' ORDER BY d.id DESC LIMIT 6")
+    kpi = db.query(
+        "SELECT COUNT(*) total, "
+        "SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) delivered, "
+        "COALESCE(AVG(distance_km),0) avg_dist FROM deliveries", (), one=True)
+    return render_template("logistics/dashboard.html", drivers=drivers, pickups=pickups,
+                           dropoffs=dropoffs, recent=recent, kpi=kpi,
+                           cart_count=_cart_count())
+
+
+@bp.route("/logistics/routes")
+@role_required("admin")
+def route_optimizer_page():
+    import json
+
+    from ai.routing import optimize_from_db, HUB
+    result = optimize_from_db()
+    map_data = json.dumps({
+        "hub": HUB,
+        "routes": result.get("routes", []),
+        "unassigned": [],
+        "animate": True,
+    })
+    return render_template("logistics/routes.html", result=result, hub=HUB,
+                           map_data=map_data,
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- Admin dashboard
+@bp.route("/admin")
+@role_required("admin")
+def admin_dashboard():
+    kpi = {
+        "users": db.query("SELECT COUNT(*) n FROM users WHERE active=1", one=True)["n"],
+        "farmers": db.query("SELECT COUNT(*) n FROM users WHERE role IN ('farmer','fpo')", one=True)["n"],
+        "consumers": db.query("SELECT COUNT(*) n FROM users WHERE role='consumer'", one=True)["n"],
+        "buyers": db.query("SELECT COUNT(*) n FROM users WHERE role='buyer'", one=True)["n"],
+        "gmv": db.query("SELECT COALESCE(SUM(total_amount),0) v FROM orders WHERE status<>'cancelled'", one=True)["v"],
+        "orders": db.query("SELECT COUNT(*) n FROM orders", one=True)["n"],
+        "active_listings": db.query("SELECT COUNT(*) n FROM products WHERE status='active'", one=True)["n"],
+        "farmer_payout": db.query("SELECT COALESCE(SUM(farmer_share),0) v FROM payments", one=True)["v"],
+    }
+    kpi["farmer_share_pct"] = round(kpi["farmer_payout"] / max(kpi["gmv"], 1) * 100)
+    monthly = db.query(
+        "SELECT substr(created_at,1,7) ym, COUNT(*) n, SUM(total_amount) amt "
+        "FROM orders GROUP BY ym ORDER BY ym")
+    by_crop = db.query(
+        "SELECT crop, SUM(subtotal) amt FROM order_items GROUP BY crop ORDER BY amt DESC LIMIT 6")
+    orders = db.query(
+        "SELECT o.*, u.name AS buyer FROM orders o JOIN users u ON u.id=o.buyer_id "
+        "ORDER BY o.id DESC LIMIT 12")
+    users = db.query("SELECT * FROM users ORDER BY id DESC LIMIT 12")
+    products = db.query(
+        "SELECT p.*, u.name AS seller FROM products p JOIN users u ON u.id=p.seller_id "
+        "ORDER BY p.id DESC LIMIT 12")
+    txns = db.query(
+        "SELECT p.*, o.order_code FROM payments p JOIN orders o ON o.id=p.order_id "
+        "ORDER BY p.id DESC LIMIT 10")
+    deliveries = db.query(
+        "SELECT d.*, o.order_code FROM deliveries d JOIN orders o ON o.id=d.order_id "
+        "ORDER BY d.id DESC LIMIT 10")
+    return render_template("admin/dashboard.html", kpi=kpi, monthly=[dict(m) for m in monthly],
+                           by_crop=by_crop, orders=orders, users=users, products=products,
+                           txns=txns, deliveries=deliveries, cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- IVR Simulator
+@bp.route("/ivr/simulator")
+@login_required
+def ivr_simulator():
+    """In-app IVR simulator — same backend APIs as a real phone call."""
+    # Suggest caller numbers for both sellers and buyers.  Farmer-only IVR
+    # actions still require farmer_id, while V7 order placement can use a
+    # registered consumer/buyer caller through the same phone simulator.
+    farmers = db.query(
+        "SELECT u.id, u.name, u.phone, u.role, u.city, "
+        "f.farm_name FROM users u LEFT JOIN farmers f ON f.user_id=u.id "
+        "WHERE u.role IN ('farmer','fpo','consumer','buyer') AND u.phone<>'' "
+        "ORDER BY CASE u.role WHEN 'farmer' THEN 1 WHEN 'fpo' THEN 2 WHEN 'consumer' THEN 3 ELSE 4 END, u.id LIMIT 16")
+    from ivr.languages import language_options
+    return render_template("ivr/simulator.html", farmers=[dict(r) for r in farmers],
+                           ivr_languages=language_options(),
+                           cart_count=_cart_count())
+
+
+# ---------------------------------------------------------------- IVR Admin Dashboard
+@bp.route("/admin/ivr")
+@role_required("admin")
+def ivr_admin():
+    """Admin IVR analytics page (server-rendered shell + AJAX data)."""
+    import db as _db
+    # KPIs straight from DB (so the page works even without JS)
+    kpi = {
+        "total_calls": _db.query("SELECT COUNT(*) n FROM ivr_call_logs", one=True)["n"],
+        "successful": _db.query("SELECT COUNT(*) n FROM ivr_call_logs WHERE success=1", one=True)["n"],
+        "failed": _db.query("SELECT COUNT(*) n FROM ivr_call_logs WHERE had_error=1 OR success=0", one=True)["n"],
+        "tamil": _db.query("SELECT COUNT(*) n FROM ivr_call_logs WHERE language='ta'", one=True)["n"],
+        "english": _db.query("SELECT COUNT(*) n FROM ivr_call_logs WHERE language='en'", one=True)["n"],
+        "listings_created": _db.query("SELECT COALESCE(SUM(listings_created),0) v FROM ivr_call_logs", one=True)["v"],
+        "bulk_accepted": _db.query("SELECT COALESCE(SUM(bulk_accepted),0) v FROM ivr_call_logs", one=True)["v"],
+        "price_requests": _db.query("SELECT COALESCE(SUM(price_requests),0) v FROM ivr_call_logs", one=True)["v"],
+        "active_sessions": _db.query("SELECT COUNT(*) n FROM ivr_sessions WHERE status='active'", one=True)["n"],
+    }
+    recent = _db.query(
+        "SELECT c.id, c.session_id, c.caller_number, c.farmer_name, c.language, "
+        "c.intent, c.success, c.had_error, c.duration_sec, c.listings_created, "
+        "c.bulk_accepted, c.start_time, c.end_time "
+        "FROM ivr_call_logs c ORDER BY c.id DESC LIMIT 20")
+    # top intents from events (last 500)
+    top_intents = _db.query(
+        "SELECT intent, COUNT(*) n FROM ivr_events WHERE intent IS NOT NULL "
+        "AND intent<>'UNKNOWN' GROUP BY intent ORDER BY n DESC LIMIT 8")
+    # provider mode info
+    from ivr.providers import mode_info
+    return render_template("ivr/admin.html", kpi=kpi,
+                           recent=[dict(r) for r in recent],
+                           top_intents=[dict(r) for r in top_intents],
+                           mode=mode_info(),
+                           cart_count=_cart_count())
+
+
+@bp.route("/admin/ivr/call/<int:call_id>")
+@role_required("admin")
+def ivr_call_detail(call_id):
+    import json as _json
+    import db as _db
+    call = _db.query("SELECT * FROM ivr_call_logs WHERE id=?", (call_id,), one=True)
+    if not call:
+        abort(404)
+    events = _db.query("SELECT * FROM ivr_events WHERE session_id=? ORDER BY id",
+                      (call["session_id"],))
+    transcript = []
+    if call["transcript"]:
+        try:
+            transcript = _json.loads(call["transcript"])
+        except _json.JSONDecodeError:
+            transcript = []
+    sess = _db.query("SELECT * FROM ivr_sessions WHERE id=?", (call["session_id"],), one=True)
+    return render_template("ivr/call_detail.html",
+                           call=dict(call),
+                           events=[dict(e) for e in events],
+                           transcript=transcript,
+                           session=dict(sess) if sess else None,
+                           cart_count=_cart_count())
