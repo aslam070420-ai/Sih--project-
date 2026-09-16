@@ -1,0 +1,126 @@
+/* FarmDirect visual-safe performance layer.
+   This file never removes backdrop blur, glass effects, particles, gradients,
+   keyframes, or visible animation. It only reduces work the browser performs
+   for content that is outside the viewport and gives the compositor hints for
+   existing moving decoration. */
+
+/* Long marketplace lists: Chromium can skip layout/paint for cards that are
+   far outside the viewport, then render them normally before they scroll in. */
+@supports (content-visibility: auto) {
+  .fd-market-grid > [data-product-card] {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 440px;
+  }
+}
+
+/* Keep the exact same effects; ask the compositor to retain layers for the
+   elements that already animate transforms/opacity continuously. */
+.fd-market-aurora,
+.fd-v5-orb,
+.fd-motion-particle,
+.fd-product-orbit,
+.fd-product-icon-v9,
+.fd-crop-body,
+.fd-crop-ping,
+.fd-market-hero::before,
+.fd-market-stage::after,
+.fd-kinetic-track {
+  will-change: transform, opacity;
+}
+
+/* Live glass is intentionally preserved. These hints can reduce repeated
+   promotion/demotion while scrolling without changing blur strength. */
+.fd-navbar,
+.fd-final-mobile-nav,
+.fd-market-hero,
+.fd-market-filter-card {
+  will-change: backdrop-filter;
+}
+
+/* Decorative transformed layers never need their rear face painted. */
+.fd-market-aurora,
+.fd-v5-orb,
+.fd-product-orbit,
+.fd-crop-body,
+.fd-crop-ping {
+  backface-visibility: hidden;
+}
+
+
+/* Smooth pass v2: preserve every visible effect while reducing off-screen work. */
+@supports (content-visibility: auto) {
+  /* Landing sections render normally before they reach the viewport, while
+     Chromium may skip layout/paint for distant sections. */
+  .fd-route-views-landing main > section:not(.fd-hero) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 620px;
+  }
+}
+
+/* Avoid asking Chromium to continuously re-promote live-blur surfaces. The
+   blur itself remains exactly enabled; only the compositor hint changes. */
+.fd-navbar,
+.fd-final-mobile-nav,
+.fd-market-hero,
+.fd-market-filter-card {
+  will-change: auto;
+}
+
+/* Keep continuously transformed decoration compositor-friendly without
+   changing any element's transform, opacity, blur, timing, or keyframes. */
+.fd-v5-orb,
+.fd-aurora,
+.fd-hero-energy-dot,
+.fd-kinetic-track,
+.fd-crop-core,
+.fd-data-orbit,
+.fd-scan-line,
+.fd-viz-node {
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+}
+
+/* Home language selector: on phones/tablets it participates in layout instead
+   of floating over the hero headline. The selector/menu functionality and
+   visual treatment stay unchanged. */
+@media (max-width: 991.98px) {
+  .fd-route-views-landing .fd-hero > .container > .fd-language-dock {
+    position: relative;
+    top: auto;
+    right: auto;
+    left: auto;
+    width: max-content;
+    max-width: 100%;
+    display: block;
+    margin: 0 0 .85rem auto;
+    z-index: 1060;
+  }
+}
+
+/* Smooth pass v3: reduce hit-testing and layer-memory overhead only. No visual
+   property, blur strength, keyframe, opacity, transform or timing is changed. */
+.fd-market-aurora,
+.fd-v5-orb,
+.fd-motion-particle,
+.fd-product-orbit,
+.fd-crop-ping,
+.fd-aurora,
+.fd-hero-energy-dot,
+.fd-data-orbit,
+.fd-scan-line,
+.fd-viz-node {
+  pointer-events: none;
+}
+
+/* Hundreds of forced compositor layers can hurt mid-range mobile GPUs more than
+   they help. CSS animations still render exactly as authored; Chromium promotes
+   transformed layers when useful instead of us permanently pinning every card
+   decoration in GPU memory. */
+@media (max-width: 991.98px) {
+  .fd-market-grid .fd-product-orbit,
+  .fd-market-grid .fd-product-icon-v9,
+  .fd-market-grid .fd-crop-body,
+  .fd-market-grid .fd-crop-ping {
+    will-change: auto;
+  }
+}
